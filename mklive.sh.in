@@ -29,7 +29,10 @@
 trap 'error_out $? $LINENO' INT TERM 0
 umask 022
 
-readonly REQUIRED_PKGS="base-files libgcc dash coreutils sed tar gawk syslinux grub-i386-efi grub-x86_64-efi squashfs-tools xorriso"
+readonly REQUIRED_PKGS_ALL="base-files libgcc dash coreutils sed tar gawk squashfs-tools xorriso"
+readonly REQUIRED_PKGS_X86="syslinux grub-i386-efi grub-x86_64-efi"
+readonly REQUIRED_PKGS_PPC="grub-powerpc-ieee1275"
+
 readonly INITRAMFS_PKGS="binutils xz device-mapper dhclient dracut-network"
 readonly PROGNAME=$(basename "$0")
 
@@ -160,7 +163,11 @@ generate_initramfs() {
     [ $? -ne 0 ] && die "Failed to generate the initramfs"
 
     mv "$ROOTFS"/boot/initrd "$BOOT_DIR"
-    cp "$ROOTFS"/boot/vmlinuz-$KERNELVERSION "$BOOT_DIR"/vmlinuz
+    if [ -f "${ROOTFS}/boot/vmlinuz-$KERNELVERSION" ]; then
+        cp "${ROOTFS}/boot/vmlinuz-$KERNELVERSION" "$BOOT_DIR"/vmlinuz
+    else
+        cp "${ROOTFS}/boot/vmlinux-$KERNELVERSION" "$BOOT_DIR"/vmlinux
+    fi
 }
 
 cleanup_rootfs() {
@@ -248,6 +255,46 @@ generate_grub_efi_boot() {
     rm -rf "$GRUB_EFI_TMPDIR"
 }
 
+generate_grub_powerpc_boot() {
+    cp -f ppc/early.cfg "$GRUB_DIR"
+    cp -f ppc/grub.cfg.in "$GRUB_DIR"/grub.cfg
+    sed -i \
+        -e "s|@@KERNVER@@|${KERNELVERSION}|" \
+        -e "s|@@KEYMAP@@|${KEYMAP}|" \
+        -e "s|@@ARCH@@|$BASE_ARCH|" \
+        -e "s|@@BOOT_TITLE@@|${BOOT_TITLE}|" \
+        -e "s|@@BOOT_CMDLINE@@|${BOOT_CMDLINE}|" \
+        -e "s|@@LOCALE@@|${LOCALE}|" "$GRUB_DIR"/grub.cfg
+
+    cp -a "$IMAGEDIR"/boot "$VOIDHOSTDIR"
+    xbps-uchroot "$VOIDHOSTDIR" grub-mkimage -- \
+        --verbose \
+        --config="boot/grub/early.cfg" \
+        --prefix="boot/grub" \
+        --directory="/usr/lib/grub/powerpc-ieee1275" \
+        --format="powerpc-ieee1275" \
+        --output="/tmp/grub.img" \
+        boot btrfs datetime disk ext2 gfxmenu help hfs hfsplus ieee1275_fb \
+        iso9660 jfs ls luks lvm macbless macho nilfs2 ofnet part_apple \
+        part_gpt part_msdos png scsi search xfs linux reboot gfxterm \
+        gfxterm_background gfxterm_menu
+    if [ $? -ne 0 ]; then
+        die "Failed to generate GRUB image"
+    fi
+
+    # required stuff
+    rm -f "$GRUB_DIR"/early.cfg
+    cp -f "$VOIDHOSTDIR"/tmp/grub.img "$BOOT_DIR"
+    cp -f ppc/ofboot.b "$BOOT_DIR"
+    cp -f ppc/ofboot.b "${BOOT_DIR}/bootinfo.txt"
+    # fix CHRP
+    mkdir -p "${IMAGEDIR}/ppc"
+    cp -f "${BOOT_DIR}/bootinfo.txt" "${IMAGEDIR}/ppc"
+    # volume icons for mac
+    cp -f ppc/Void.icns "${IMAGEDIR}/Icon"
+    cp -f ppc/Void.icns "${IMAGEDIR}/.VolumeIcon.icns"
+}
+
 generate_squashfs() {
     umount_pseudofs
 
@@ -271,18 +318,34 @@ generate_squashfs() {
     rm -rf "$ROOTFS" "$BUILDDIR/tmp-rootfs" "$BUILDDIR/tmp"
 }
 
-generate_iso_image() {
+generate_iso_image_base() {
     "$VOIDHOSTDIR"/usr/bin/xorriso -as mkisofs \
         -iso-level 3 -rock -joliet \
         -max-iso9660-filenames -omit-period \
         -omit-version-number -relaxed-filenames -allow-lowercase \
-        -volid "VOID_LIVE" \
-        -eltorito-boot boot/isolinux/isolinux.bin \
+        -volid "VOID_LIVE" "$@" \
+        -output "$OUTPUT_FILE" "$IMAGEDIR" || die "Failed to generate ISO image"
+}
+
+generate_iso_image_x86() {
+    generate_iso_image_base -eltorito-boot boot/isolinux/isolinux.bin \
         -eltorito-catalog boot/isolinux/boot.cat \
         -no-emul-boot -boot-load-size 4 -boot-info-table \
         -eltorito-alt-boot -e boot/grub/efiboot.img -isohybrid-gpt-basdat -no-emul-boot \
-        -isohybrid-mbr "$SYSLINUX_DATADIR"/isohdpfx.bin \
-        -output "$OUTPUT_FILE" "$IMAGEDIR" || die "Failed to generate ISO image"
+        -isohybrid-mbr "$SYSLINUX_DATADIR"/isohdpfx.bin
+}
+
+generate_iso_image_ppc() {
+    generate_iso_image_base -hfsplus -isohybrid-apm-hfsplus \
+        -hfsplus-file-creator-type chrp tbxi boot/ofboot.b \
+        -hfs-bless-by p boot -sysid PPC -chrp-boot-part
+}
+
+generate_iso_image() {
+    case "$BASE_ARCH" in
+        ppc*) generate_iso_image_ppc ;;
+        *) generate_iso_image_x86 ;;
+    esac
 }
 
 #
@@ -376,6 +439,12 @@ KERNELVERSION=$($XBPS_UHELPER_CMD getpkgversion ${_kver})
 
 : ${OUTPUT_FILE="void-live-${BASE_ARCH}-${KERNELVERSION}-$(date +%Y%m%d).iso"}
 
+REQUIRED_PKGS="$REQUIRED_PKGS_ALL"
+case "$BASE_ARCH" in
+    ppc*) REQUIRED_PKGS="$REQUIRED_PKGS $REQUIRED_PKGS_PPC" ;;
+    *) REQUIRED_PKGS="$REQUIRED_PKGS $REQUIRED_PKGS_X86" ;;
+esac
+
 print_step "Installing software to generate the image: ${REQUIRED_PKGS} ..."
 install_prereqs
 
@@ -394,11 +463,19 @@ fi
 print_step "Generating initramfs image ($INITRAMFS_COMPRESSION)..."
 generate_initramfs
 
-print_step "Generating isolinux support for PC-BIOS systems..."
-generate_isolinux_boot
+case "$BASE_ARCH" in
+    ppc*)
+        print_step "Generating GRUB support for PowerPC systems..."
+        generate_grub_powerpc_boot
+        ;;
+    *)
+        print_step "Generating isolinux support for PC-BIOS systems..."
+        generate_isolinux_boot
 
-print_step "Generating GRUB support for EFI systems..."
-generate_grub_efi_boot
+        print_step "Generating GRUB support for EFI systems..."
+        generate_grub_efi_boot
+        ;;
+esac
 
 print_step "Cleaning up rootfs..."
 cleanup_rootfs
