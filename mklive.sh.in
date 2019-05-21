@@ -310,7 +310,7 @@ while getopts "a:b:r:c:C:T:Kk:l:i:I:s:S:o:p:h" opt; do
     esac
 done
 shift $((OPTIND - 1))
-XBPS_REPOSITORY="$XBPS_REPOSITORY --repository=http://alpha.de.repo.voidlinux.org/current --repository=http://alpha.de.repo.voidlinux.org/current/musl"
+XBPS_REPOSITORY="$XBPS_REPOSITORY --repository=https://repo.void-power.octaforge.org/current --repository=https://repo.void-power.octaforge.org/current/musl --repository=https://repo.void-power.octaforge.org/current/be --repository=https://repo.void-power.octaforge.org/current/be/musl --repository=https://repo.void-power.octaforge.org/current/ppc --repository=https://repo.void-power.octaforge.org/current/ppc/musl --repository=https://alpha.de.repo.voidlinux.org/current --repository=https://alpha.de.repo.voidlinux.org/current/musl"
 # Configure dracut to use overlayfs for the writable overlay.
 BOOT_CMDLINE="$BOOT_CMDLINE rd.live.overlay.overlayfs=1 "
 
