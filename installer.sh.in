@@ -68,6 +68,55 @@ if [ -e /sys/firmware/efi/systab ]; then
     fi
 fi
 
+case "$(uname -m)" in
+    ppc*) PPC_SYSTEM=1 ;;
+    *) ;;
+esac
+
+check_ppc() {
+    if [ -z "$PPC_SYSTEM" ] || [ -n "$PPC_FLAVOR" ]; then
+        return
+    fi
+    case "$1" in
+        *PowerNV*|*OPAL*) PPC_FLAVOR=opal ;;
+        *pSeries*|*CHRP*)
+            PPC_FLAVOR=chrp
+            PPC_TARGET=powerpc-ieee1275
+            ;;
+        *PowerMac*|*MacRISC*)
+            PPC_FLAVOR=mac
+            PPC_TARGET=powerpc-ieee1275
+            ;;
+        *) ;;
+    esac
+}
+
+# check a few fields for particular ppc setups, first to match wins
+# if not detected, manual bootloader setup is necessary, but we can
+# still install the rootfs at least, as long as you provide a mountpoint
+
+if [ -n "$PPC_SYSTEM" -a -z "$PPC_FLAVOR" ]; then
+    case "$(grep '^pmac-generation' /proc/cpuinfo)" in
+        *OldWorld*) PPC_FLAVOR=mac_ow ;;
+        *NewWorld*)
+            PPC_FLAVOR=mac
+            PPC_TARGET=powerpc-ieee1275
+            ;;
+        *);;
+    esac
+fi
+
+# examples: 'PowerNV', 'pSeries', 'PowerMac'
+check_ppc "$(grep '^platform' /proc/cpuinfo)"
+# examples: 'PowerMac3,1 MacRISC MacRISC2 Power Macintosh'
+check_ppc "$(grep '^motherboard' /proc/cpuinfo)"
+# examples: 'PowerNV T2P9S01 REV 1.01', 'PowerMac3,1', 'CHRP IBM pSeries'
+check_ppc "$(grep '^machine' /proc/cpuinfo)"
+# examples: 'T2P9S01 REV 1.01', 'PowerMac3,1', 'IBM pSeries'
+check_ppc "$(grep '^model' /proc/cpuinfo)"
+# examples: 'OPAL'
+check_ppc "$(grep '^firmware' /proc/cpuinfo)"
+
 # dialog colors
 BLACK="\Z0"
 RED="\Z1"
@@ -428,7 +477,10 @@ menu_filesystems() {
         DIALOG --ok-label "Change" --cancel-label "Done" \
             --title " Select the partition to edit " --menu "$MENULABEL" \
             ${MENUSIZE} $(show_partitions)
-        [ $? -ne 0 ] && return
+        if [ $? -ne 0 ]; then
+            FILESYSTEMS_DONE=1
+            return
+        fi
 
         dev=$(cat $ANSWER)
         DIALOG --title " Select the filesystem type for $dev " \
@@ -479,21 +531,94 @@ menu_filesystems() {
     done
 }
 
-menu_partitions() {
+menu_partitions_wipe() {
+    local device="$1"
+
+    while true; do
+        DIALOG --title " Wipe partitioning information " --yesno "\n
+${BOLD}Do you wish to wipe the partitioning information on \`$device'?${RESET}\n\n
+If you're going to modify the existing partition table, select \`No' here!\n\n
+Otherwise, if you're going to create a fresh partition table, it is\n
+recommended to do this, as otherwise the partitioning information\n
+may not correctly refresh (the system might see the old ones).\n\n
+Please keep in mind that doing this will make all the data on the\n
+drive inaccessible." 16 80
+        if [ $? -eq 0 ]; then
+            DIALOG --title " Do you want to proceed? " --yesno "\n
+${BOLD}This will wipe the partitioning information on \`$device'.${RESET}\n\n
+Do you wish to continue?" ${MSGBOXSIZE}
+            if [ $? -eq 0 ]; then
+                break
+            else
+                continue
+            fi
+        elif [ $? -eq 1 ]; then
+            return
+        else
+            continue
+        fi
+    done
+
+    INFOBOX "Wiping partitioning on \`${device}'..." 4 60
+    echo "Wiping partitioning information on $device..." >$LOG
+    wipefs -a "$device" >$LOG 2>&1
+    if [ $? -ne 0 ]; then
+        DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
+        wiping the partitioning info failed.\n
+        Check $LOG for errors." ${MSGBOXSIZE}
+    fi
+
+    sync && sync && sync
+    blockdev --rereadpt "$device"
+}
+
+# $1 == program to use, $2 == message, $3 == whether to offer wipe menu
+menu_partitions_base() {
     DIALOG --title " Select the disk to partition " \
         --menu "$MENULABEL" ${MENUSIZE} $(show_disks)
     if [ $? -eq 0 ]; then
-        local device=$(cat $ANSWER)
+        local device=$(cat $ANSWER) software
 
-        DIALOG --title " Select the software for partitioning " \
-            --menu "$MENULABEL" ${MENUSIZE} \
-            "cfdisk" "Easy to use" \
-            "fdisk" "More advanced"
+        case "$1" in
+            apm)
+                software="pmac-fdisk"
+                ;;
+            *)
+                DIALOG --title " Select the software for partitioning " \
+                    --menu "$MENULABEL" ${MENUSIZE} \
+                    "cfdisk" "Easy to use" \
+                    "fdisk" "More advanced"
+                if [ $? -eq 0 ]; then
+                    software=$(cat $ANSWER)
+                else
+                    return
+                fi
+                ;;
+        esac
+
+        if [ -n "$3" ]; then
+            menu_partitions_wipe "$device"
+        fi
+
+        DIALOG --title "Modify Partition Table on $device" --msgbox "\n
+${BOLD}$software will be executed in disk $device.${RESET}\n\n$2" 18 80
         if [ $? -eq 0 ]; then
-            local software=$(cat $ANSWER)
+            while true; do
+                clear
+                "$software" "$device"
+                sync && sync && sync
+                blockdev --rereadpt "$device"
+                PARTITIONS_DONE=1
+                break
+            done
+        else
+            return
+        fi
+    fi
+}
 
-            DIALOG --title "Modify Partition Table on $device" --msgbox "\n
-${BOLD}${software} will be executed in disk $device.${RESET}\n\n
+menu_partitions_x86() {
+    menu_partitions_base any "
 For BIOS systems, MBR or GPT partition tables are supported.\n
 To use GPT on PC BIOS systems an empty partition of 1MB must be added\n
 at the first 2GB of the disk with the TOGGLE \`bios_grub' enabled.\n
@@ -504,16 +629,93 @@ EFI System Partition. This partition must have mountpoint as \`/boot/efi'.\n\n
 At least 1 partition is required for the rootfs (/).\n
 For swap, RAM*2 must be really enough. For / 600MB are required.\n\n
 ${BOLD}WARNING: /usr is not supported as a separate partition.${RESET}\n
+${RESET}\n"
+}
+
+menu_partitions_ppcmac_other() {
+    menu_partitions_base any "
+You can use this to partition non-bootable devices.\n\n
+In order to boot from a device, it needs to contain an Apple\n
+Partition Map (APM) with a bootstrap partition. Use \`pmac-fdisk'\n
+for that purpose.\n\n
+The actual root file system and other partitions can be present on\n
+a non-bootable device. Do keep in mind that the device containing\n
+the partition with \`/boot' on it must be visible to OpenFirmware\n
+in order to be accessible from the bootloader.\n
+${RESET}\n"
+}
+
+menu_partitions_ppcmac_apm() {
+    menu_partitions_base apm "
+${BOLD}Example with 100GB for the rootfs and the rest for swap:${RESET}\n\n
+i\n
+C 2p 10M bootstrap Apple_Bootstrap\n
+c 3p 100G rootfs\n
+c 4p 4p swap\n\n
+At least the bootstrap partition must be present on APM.\n
+Other partitions can be made on other devices with other\n
+partitioning schemes.\n
+${RESET}\n" 1
+}
+
+menu_partitions_ppcmac() {
+    local toolopt
+
+    while true; do
+        DIALOG --title " Disk partitioning " --msgbox "\n
+${BOLD}You will need to partition your disk(s).${RESET}\n\n
+In order to be able to boot, you need a bootstrap partition on an\n
+Apple Partition Map (APM). Other partitions can be located on any\n
+partitioning scheme supported by GRUB (or your custom bootloader).\n\n
+On the next screen, select what you want to partition. Keep in\n
+mind that the device containing the partition with \`/boot' on\n
+it must be visible to OpenFirmware.\n\n
+For GRUB (recommended), create an \`Apple_Bootstrap' partition of\n
+10MB on APM. If you wish to put other partitions on the same device\n
+and partitioning scheme, follow with an \`Apple_UNIX_SVR2' partition\n
+for the rootfs (/) and optionally another \`Apple_UNIX_SVR2' for swap.\n\n
+For swap, RAM*2 must be really enough. For / 600MB are required.\n\n
+${BOLD}WARNING: /usr is not supported as a separate partition.\n
 ${RESET}\n" 18 80
-            if [ $? -eq 0 ]; then
-                while true; do
-                    clear; $software $device; PARTITIONS_DONE=1
-                    break
-                done
-            else
-                return
-            fi
+
+        DIALOG --title " Select what to partition " --menu "$MENULABEL" \
+            ${MENUSIZE} \
+            "apm" "Apple Partition Map" \
+            "other" "Other partition schemes (MBR, GPT, etc.)"
+        if [ $? -eq 0 ]; then
+            toolopt=$(cat $ANSWER)
+        else
+            return
         fi
+        case "$toolopt" in
+            other) menu_partitions_ppcmac_other ;;
+            *) menu_partitions_ppcmac_apm ;;
+        esac
+        break
+    done
+}
+
+menu_partitions_ppc() {
+    menu_partitions_base any "
+For PowerNV (OpenPOWER/OPAL) systems, you only need a root (/) partition,\n
+as the bootloader is a part of the firmware. GPT is recommended.\n\n
+For SLOF systems with GRUB, MBR is recommended (GPT works for >= POWER8).\n
+You will need to create a bootable \`PowerPC PReP boot' partition of\n
+about ~10MB.\n\n
+You can also create a swap partition, depending on the amount of RAM
+available, typically RAM*2 at most. For / 600MB are required.\n\n
+${BOLD}WARNING: /usr is not supported as a separate partition.${RESET}\n
+${RESET}\n"
+}
+
+menu_partitions() {
+    if [ -n "$PPC_SYSTEM" ]; then
+        case "$PPC_FLAVOR" in
+            mac*) menu_partitions_ppcmac ;;
+            *) menu_partitions_ppc ;;
+        esac
+    else
+        menu_partitions_x86
     fi
 }
 
@@ -762,18 +964,77 @@ set_useraccount() {
         chpasswd -R $TARGETDIR -c SHA512
 }
 
-menu_bootloader() {
+bootloader_list() {
+    # OpenFirmware needs a partition rather than a drive
+    if [ -n "$PPC_SYSTEM" ]; then
+        show_partitions
+    else
+        show_disks
+    fi
+}
+
+menu_bootloader_device() {
+    if [ -n "$PPC_SYSTEM" ]; then
+        case "$PPC_FLAVOR" in
+            mac_ow)
+                DIALOG --msgbox "No OldWorld Mac bootloader support." ${MSGBOXSIZE}
+                set_option BOOTLOADER "none"
+                BOOTLOADER_DONE=1
+                return 0
+                ;;
+            mac|chrp)
+                # for NewWorld Macs and pSeries we know how to install GRUB
+                ;;
+            *)
+                DIALOG --yesno "Set up bootloader configuration?" ${YESNOSIZE}
+                if [ $? -eq 0 ]; then
+                    # for PowerNV/unknown platforms, do not install bootloader
+                    # on a device, as it's either unknown or uses petitboot
+                    set_option BOOTLOADER "firmware"
+                else
+                    set_option BOOTLOADER "none"
+                fi
+                BOOTLOADER_DONE=1
+                return 0
+                ;;
+        esac
+    fi
+    local title
+    if [ -n "$PPC_SYSTEM" ]; then
+        case "$PPC_FLAVOR" in
+            chrp) title=" Select the PReP partition to install the bootloader";;
+            mac) title=" Select the bootstrap partition to install the bootloader";;
+            *) ;; # unreachable
+        esac
+    else
+        title=" Select the disk to install the bootloader"
+    fi
     while true; do
-        DIALOG --title " Select the disk to install the bootloader" \
-            --menu "$MENULABEL" ${MENUSIZE} $(show_disks) none "Manage bootloader otherwise"
+        DIALOG --title "$title" \
+            --menu "$MENULABEL" ${MENUSIZE} $(bootloader_list) none "Manage bootloader otherwise"
         if [ $? -eq 0 ]; then
             set_option BOOTLOADER "$(cat $ANSWER)"
             BOOTLOADER_DONE=1
-            break
+            return 0
         else
-            return
+            return 1
         fi
     done
+    return 1
+}
+
+menu_bootloader() {
+    menu_bootloader_device
+    if [ $? -eq 1 ]; then
+        return
+    fi
+    local blopt
+    blopt="$(get_option BOOTLOADER)"
+    # do not ask when we aren't actually installing grub
+    if [ "$blopt" = "none" -o "$blopt" = "firmware" ]; then
+        set_option TEXTCONSOLE 0
+        return
+    fi
     while true; do
         DIALOG --yesno "Use a graphical terminal for the boot loader?" ${YESNOSIZE}
         if [ $? -eq 0 ]; then
@@ -788,23 +1049,156 @@ menu_bootloader() {
     done
 }
 
+# before running grub-install, the PReP partition needs to be zero'd
+prepare_bootloader_chrp() {
+    local dev
+    dev="$1"
+    dd if=/dev/zero of="$dev" bs=512 count=$(blockdev --getsz "$dev") >$LOG 2>&1
+    if [ $? -ne 0 ]; then
+        DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
+failed to clear PReP boot on ${dev}!\ncheck $LOG for errors." ${MSGBOXSIZE}
+        DIE 1
+    fi
+    sync && sync && sync
+}
+
+# before running grub-install, the bootstrap partition needs to be formatted
+prepare_bootloader_mac() {
+    local dev mntpt
+    dev="$1"
+    mntpt="${TARGETDIR}/.apple_bootstrap"
+    echo "Loading hfs filesystem support..." >$LOG
+    modprobe hfs >$LOG 2>&1
+    echo "Clearing bootstrap..." >$LOG
+    dd if=/dev/zero of="$dev" bs=512 \
+        count=$(blockdev --getsz "$dev") >$LOG 2>&1
+    if [ $? -ne 0 ]; then
+        DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
+failed to clear bootstrap on ${dev}!\ncheck $LOG for errors." ${MSGBOXSIZE}
+        DIE 1
+    fi
+    sync && sync && sync
+    echo "Formatting bootstrap partition $dev..." >$LOG
+    hformat -l bootstrap "$dev" >$LOG 2>&1
+    if [ $? -ne 0 ]; then
+        DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
+failed to format bootstrap ${dev} with hfs!\ncheck $LOG for errors." ${MSGBOXSIZE}
+        DIE 1
+    fi
+    sync && sync && sync
+    echo "Creating mount point for bootstrap..." >$LOG
+    mkdir -p "$mntpt"
+    echo "Mounting bootstrap..." >$LOG
+    mount -t hfs "$dev" "$mntpt" >$LOG 2>&1
+    if [ $? -ne 0 ]; then
+        DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
+failed to mount $dev on $mntpt! check $LOG for errors." ${MSGBOXSIZE}
+        DIE 1
+    fi
+}
+
+prepare_bootloader() {
+    case "$PPC_FLAVOR" in
+        chrp) prepare_bootloader_chrp "$@" ;;
+        mac) prepare_bootloader_mac "$@" ;;
+        *) ;;
+    esac
+}
+
+# more steps needed after GRUB installation
+finalize_bootloader_mac() {
+    local dev mntpt
+    dev="$1"
+    mntpt="${TARGETDIR}/.apple_bootstrap"
+    umount "$mntpt" >$LOG 2>&1
+    rmdir "$mntpt" >$LOG 2>&1
+    hmount "$dev" >$LOG 2>&1
+    if [ $? -ne 0 ]; then
+        DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
+        failed to mount Apple_Bootstrap ($dev), bootloader may not function.\n
+        Check $LOG for errors." ${MSGBOXSIZE}
+        return
+    fi
+    hattrib -t tbxi -c UNIX :System:Library:CoreServices:BootX >$LOG 2>&1
+    if [ $? -ne 0 ]; then
+        DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
+        failed to set boot script type, bootloader may not function.\n
+        Check $LOG for errors." ${MSGBOXSIZE}
+        humount >$LOG 2>&1
+        return
+    fi
+    hattrib -b :System:Library:CoreServices >$LOG 2>&1
+    if [ $? -ne 0 ]; then
+        DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
+        failed to bless bootloader directory, bootloader may not function.\n
+        Check $LOG for errors." ${MSGBOXSIZE}
+    fi
+    humount >$LOG 2>&1
+    DIALOG --yesno "Do you want to update the boot device NVRAM record?" ${YESNOSIZE}
+    if [ $? -eq 0 ]; then
+        local bs_ofpath bs_devn bs_devline
+        if [ -n "$(command -v ofpath)" ]; then
+            bs_ofpath="$(ofpath $dev)"
+        else
+            bs_ofpath="$(ofpathname $dev)"
+        fi
+        if [ $? -ne 0 -o -z "$bs_ofpath" ]; then
+            DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
+failed to get OF path for ${dev}, not updating NVRAM!\ncheck $LOG for errors." ${MSGBOXSIZE}
+            return
+        fi
+        bs_devn=$(lsblk -no maj:min "$dev"|grep -o ':[0-9]\+')
+        bs_devline="${bs_ofpath}${bs_devn},\\\\BootX"
+        nvsetenv boot-device "$bs_devline" >$LOG 2>&1
+        if [ $? -ne 0 ]; then
+            DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
+nvsetenv failed, not updating NVRAM! GRUB may not start by default.\n
+If you want it to, you can try updating it manually at IEEE1275\n
+prompt, by typing \`setenv boot-device $bs_devline'.\n
+check $LOG for errors." ${MSGBOXSIZE}
+            return
+        fi
+        # finally, success
+    fi
+}
+
+finalize_bootloader() {
+    case "$PPC_FLAVOR" in
+        mac) finalize_bootloader_mac "$@" ;;
+        *) ;;
+    esac
+}
+
 set_bootloader() {
     local dev=$(get_option BOOTLOADER) grub_args=
 
     if [ "$dev" = "none" ]; then return; fi
 
-    # Check if it's an EFI system via efivars module.
-    if [ -n "$EFI_SYSTEM" ]; then
-        grub_args="--target=$EFI_TARGET --efi-directory=/boot/efi --bootloader-id=void_grub --recheck"
-    fi
-    echo "Running grub-install $grub_args $dev..." >$LOG
-    chroot $TARGETDIR grub-install $grub_args $dev >$LOG 2>&1
-    if [ $? -ne 0 ]; then
-        DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
-        failed to install GRUB to $dev!\nCheck $LOG for errors." ${MSGBOXSIZE}
-        DIE 1
+    if [ "$dev" != "firmware" ]; then
+        # Check if it's an EFI system via efivars module.
+        if [ -n "$EFI_SYSTEM" ]; then
+            grub_args="--target=$EFI_TARGET --efi-directory=/boot/efi --bootloader-id=void_grub --recheck"
+        elif [ -n "$PPC_SYSTEM" ]; then
+            if [ "$PPC_FLAVOR" = "mac" ]; then
+                grub_args="--macppc-directory=/.apple_bootstrap --no-nvram"
+            fi
+        fi
+        echo "Preparing bootloader environment for $dev..." >$LOG
+        prepare_bootloader "$dev"
+        echo "Running grub-install $grub_args $dev..." >$LOG
+        chroot $TARGETDIR grub-install $grub_args $dev >$LOG 2>&1
+        if [ $? -ne 0 ]; then
+            DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
+            failed to install GRUB to $dev!\nCheck $LOG for errors." ${MSGBOXSIZE}
+            DIE 1
+        fi
+        finalize_bootloader "$dev"
+    else
+        # /boot/grub would normally be created by grub-install but not here
+        mkdir -p $TARGETDIR/boot/grub
     fi
     echo "Running grub-mkconfig on $TARGETDIR..." >$LOG
+    INFOBOX "Running grub-mkconfig on $TARGETDIR..." 8 60
     chroot $TARGETDIR grub-mkconfig -o /boot/grub/grub.cfg >$LOG 2>&1
     if [ $? -ne 0 ]; then
         DIALOG --msgbox "${BOLD}${RED}ERROR${RESET}: \
@@ -999,8 +1393,17 @@ the mount point for the root filesystem (/) has not yet been configured." ${MSGB
 The EFI System Partition has not yet been configured, please create it\n
 as FAT32, mountpoint /boot/efi and at least with 100MB of size." ${MSGBOXSIZE}
         return 1
+    elif [ "$PPC_FLAVOR" = "mac" -a "$bootdev" != "none" ]; then
+        local pdev="/dev/$(lsblk -no pkname $bootdev)"
+        local ptname=$(pmac-fdisk -r -l "$pdev"|grep "$bootdev"|awk '{print $2}')
+        if [ "$ptname" != "Apple_Bootstrap" ]; then
+            DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
+You haven't specified a correct Apple_Bootstrap partition, please check\n
+your settings and amend the partitioning/selection appropriately." ${MSGBOXSIZE}
+            return 1
+        fi
     fi
-    FILESYSTEMS_DONE=1
+    return 0
 }
 
 create_filesystems() {
@@ -1166,7 +1569,9 @@ copy_rootfs() {
 install_packages() {
     local _grub= _syspkg=
 
-    if [ -n "$EFI_SYSTEM" ]; then
+    if [ -n "$PPC_SYSTEM" ]; then
+        _grub="grub-powerpc-ieee1275"
+    elif [ -n "$EFI_SYSTEM" ]; then
         if [ $EFI_FW_BITS -eq 32 ]; then
             _grub="grub-i386-efi"
         else
@@ -1216,9 +1621,8 @@ configured, please do so before starting the installation.${RESET}" ${MSGBOXSIZE
 
     # Validate filesystems after making sure bootloader is done,
     # so that specific checks can be made based on the selection
-    validate_filesystems || return 1
-
-    if [ -z "$FILESYSTEMS_DONE" ]; then
+    validate_filesystems
+    if [ $? -ne 0 ]; then
         DIALOG --msgbox "${BOLD}Required filesystems were not configured, \
 please do so before starting the installation.${RESET}" ${MSGBOXSIZE}
         return 1
@@ -1335,9 +1739,28 @@ ${BOLD}Do you want to continue?${RESET}" 20 80 || return
             -e 's|#\(GRUB_TERMINAL_OUTPUT\).*|\1=console|'
     fi
 
+    # disable os-prober for PowerNV systems, petitboot scans all storage
+    if [ -n "$PPC_SYSTEM" -a "$PPC_FLAVOR" = "opal" ]; then
+        echo "GRUB_DISABLE_OS_PROBER=true" >> $TARGETDIR/etc/default/grub
+    fi
+
     # install bootloader.
     set_bootloader
     sync && sync && sync
+
+    while true; do
+        DIALOG --yesno "${BOLD}Void Linux has been installed successfully!${RESET}\n
+Do you want to open a shell in the target system?\n
+This can be used for final changes/installing packages.
+Simply type \`exit' when done to finish the installation." ${YESNOSIZE}
+        if [ $? -eq 0 ]; then
+            chroot $TARGETDIR /bin/sh
+        elif [ $? -eq 1 ]; then
+            break
+        else
+            continue
+        fi
+    done
 
     # unmount all filesystems.
     umount_filesystems
@@ -1390,9 +1813,9 @@ menu() {
             "Timezone" "Set system time zone" \
             "RootPassword" "Set system root password" \
             "UserAccount" "Set primary user name and password" \
-            "BootLoader" "Set disk to install bootloader" \
             "Partition" "Partition disk(s)" \
             "Filesystems" "Configure filesystems and mount points" \
+            "BootLoader" "Set disk to install bootloader" \
             "Install" "Start installation with saved settings" \
             "Exit" "Exit installation"
     else
@@ -1409,9 +1832,9 @@ menu() {
             "Timezone" "Set system time zone" \
             "RootPassword" "Set system root password" \
             "UserAccount" "Set primary user name and password" \
-            "BootLoader" "Set disk to install bootloader" \
             "Partition" "Partition disk(s)" \
             "Filesystems" "Configure filesystems and mount points" \
+            "BootLoader" "Set disk to install bootloader" \
             "Install" "Start installation with saved settings" \
             "Exit" "Exit installation"
     fi
@@ -1434,10 +1857,10 @@ menu() {
         "Timezone") menu_timezone && [ -n "$TIMEZONE_DONE" ] && DEFITEM="RootPassword";;
         "RootPassword") menu_rootpassword && [ -n "$ROOTPASSWORD_DONE" ] && DEFITEM="UserAccount";;
         "UserAccount") menu_useraccount && [ -n "$USERNAME_DONE" ] && [ -n "$USERPASSWORD_DONE" ] \
-               && DEFITEM="BootLoader";;
-        "BootLoader") menu_bootloader && [ -n "$BOOTLOADER_DONE" ] && DEFITEM="Partition";;
+               && DEFITEM="Partition";;
         "Partition") menu_partitions && [ -n "$PARTITIONS_DONE" ] && DEFITEM="Filesystems";;
-        "Filesystems") menu_filesystems && [ -n "$FILESYSTEMS_DONE" ] && DEFITEM="Install";;
+        "Filesystems") menu_filesystems && [ -n "$FILESYSTEMS_DONE" ] && DEFITEM="BootLoader";;
+        "BootLoader") menu_bootloader && [ -n "$BOOTLOADER_DONE" ] && DEFITEM="Install";;
         "Install") menu_install;;
         "Exit") DIE;;
         *) DIALOG --yesno "Abort Installation?" ${YESNOSIZE} && DIE
