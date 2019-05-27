@@ -26,9 +26,21 @@ readonly KDE_IMG=void-live-${ARCH}-${DATE}-kde.iso
 readonly LXDE_IMG=void-live-${ARCH}-${DATE}-lxde.iso
 readonly LXQT_IMG=void-live-${ARCH}-${DATE}-lxqt.iso
 
-readonly GRUB="grub-i386-efi grub-x86_64-efi"
+case "$ARCH" in
+	ppc*) readonly GRUB="grub-powerpc-ieee1275" ;;
+	*)    readonly GRUB="grub-i386-efi grub-x86_64-efi" ;;
+esac
 
-readonly BASE_PKGS="dialog cryptsetup lvm2 mdadm void-docs-browse $GRUB"
+case "$ARCH" in
+	ppc*)
+		readonly EXTRA_PKGS="mac-fdisk hfsutils"
+		;;
+	*)
+		readonly EXTRA_PKGS=""
+		;;
+esac
+
+readonly BASE_PKGS="dialog cryptsetup lvm2 mdadm $EXTRA_PKGS $GRUB"
 readonly X_PKGS="$BASE_PKGS xorg-minimal xorg-input-drivers xorg-video-drivers setxkbmap xauth font-misc-misc terminus-font dejavu-fonts-ttf alsa-plugins-pulseaudio"
 readonly E_PKGS="$X_PKGS lxdm enlightenment terminology udisks2 firefox-esr"
 readonly XFCE_PKGS="$X_PKGS lxdm xfce4 gnome-themes-standard gnome-keyring network-manager-applet gvfs-afc gvfs-mtp gvfs-smb udisks2 firefox-esr"
