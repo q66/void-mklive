@@ -6,6 +6,33 @@
 readonly LIBTOOLS="cp echo cat printf which mountpoint mount umount modprobe"
 readonly HOSTARCH=$(xbps-uhelper arch)
 
+is_target_native() {
+    # Because checking whether the target is runnable is ugly, stuff
+    # it into a single function. That makes it easy to check anywhere.
+    local target_arch
+
+    target_arch="$1"
+    # this will cover most
+    if [ "${target_arch%-musl}" = "${HOSTARCH%-musl}" ]; then
+        return 0
+    fi
+
+    case "$HOSTARCH" in
+        # ppc64le has no 32-bit variant, only runs its own stuff
+        ppc64le*) return 1 ;;
+        # x86_64 also runs i686
+        x86_64*) test -z "${target_arch##*86*}" ;;
+        # aarch64 also runs armv*
+        aarch64*) test -z "${target_arch##armv*}" ;;
+        # bigendian ppc64 also runs ppc
+        ppc64*) test "${target_arch%-musl}" = "ppc" ;;
+        # anything else is just their own
+        *) return 1 ;;
+    esac
+
+    return $?
+}
+
 info_msg() {
     # This function handles the printing that is bold within all
     # scripts.  This is a convenience function so that the rather ugly
@@ -80,9 +107,7 @@ umount_pseudofs() {
 
 run_cmd_target() {
     info_msg "Running $* for target $XBPS_TARGET_ARCH ..."
-    if [ "$XBPS_TARGET_ARCH" = "${HOSTARCH}" ] ||
-           [ -z "${XBPS_TARGET_ARCH##*86*}" ] &&
-               [ -z "${HOSTARCH##*86*}" ] ; then
+    if is_target_native "$XBPS_TARGET_ARCH"; then
         # This is being run on the same architecture as the host,
         # therefore we should set XBPS_ARCH.
         if ! eval XBPS_ARCH="$XBPS_TARGET_ARCH" "$@" ; then
@@ -165,51 +190,63 @@ register_binfmt() {
         set_target_arch_from_platform
     fi
 
-    case "${XBPS_TARGET_ARCH}" in
-        armv*)
-            _cpu=arm
-            _magic="\x7fELF\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x28\x00"
-            _mask="\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff"
-            QEMU_BIN=qemu-arm-static
-            ;;
-        aarch64*)
-            _cpu=aarch64
-            _magic="\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7"
-            _mask="\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff"
-            QEMU_BIN=qemu-aarch64-static
-            ;;
-        ppc64le*)
-            _cpu=ppc64le
-            _magic="\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x15\x00"
-            _mask="\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\x00"
-            QEMU_BIN=qemu-ppc64le-static
-            ;;
-        ppc64*)
-            _cpu=ppc64
-            _magic="\x7fELF\x02\x02\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x15"
-            _mask="\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff"
-            QEMU_BIN=qemu-ppc64-static
-            ;;
-        ppc*)
-            _cpu=ppc
-            _magic="\x7fELF\x01\x02\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x14"
-            _mask="\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff"
-            QEMU_BIN=qemu-ppc-static
-            ;;
-        mipsel*)
-            _cpu=mipsel
-            _magic="\x7fELF\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x08\x00"
-            _mask="\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff"
-            QEMU_BIN=qemu-mipsel-static
-            ;;
-        *86*)
-            info_msg "FIXME: Assuming that x86 instructions are native"
-            QEMU_BIN=NATIVE
-            ;;
-        *)
-            die "Unknown target architecture!"
-            ;;
-    esac
+    if is_target_native "${XBPS_TARGET_ARCH}"; then
+        QEMU_BIN=NATIVE
+    else
+        case "${XBPS_TARGET_ARCH}" in
+            armv*)
+                _cpu=arm
+                _magic="\x7fELF\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x28\x00"
+                _mask="\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff"
+                QEMU_BIN=qemu-arm-static
+                ;;
+            aarch64*)
+                _cpu=aarch64
+                _magic="\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7"
+                _mask="\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff"
+                QEMU_BIN=qemu-aarch64-static
+                ;;
+            ppc64le*)
+                _cpu=ppc64le
+                _magic="\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x15\x00"
+                _mask="\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\x00"
+                QEMU_BIN=qemu-ppc64le-static
+                ;;
+            ppc64*)
+                _cpu=ppc64
+                _magic="\x7fELF\x02\x02\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x15"
+                _mask="\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff"
+                QEMU_BIN=qemu-ppc64-static
+                ;;
+            ppc*)
+                _cpu=ppc
+                _magic="\x7fELF\x01\x02\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x14"
+                _mask="\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff"
+                QEMU_BIN=qemu-ppc-static
+                ;;
+            mipsel*)
+                _cpu=mipsel
+                _magic="\x7fELF\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x08\x00"
+                _mask="\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff"
+                QEMU_BIN=qemu-mipsel-static
+                ;;
+            i686*)
+                _cpu=i386
+                _magic="\x7fELF\x01\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x03\x00"
+                _mask="\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff"
+                QEMU_BIN=qemu-i386-static
+                ;;
+            x86_64*)
+                _cpu=x86_64
+                _magic="\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00"
+                _mask="\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff"
+                QEMU_BIN=qemu-x86_64-static
+                ;;
+            *)
+                die "Unknown target architecture!"
+                ;;
+        esac
+    fi
 
     # In the special case where the build is native we can return
     # without doing anything else
