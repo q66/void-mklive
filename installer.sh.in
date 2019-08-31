@@ -542,12 +542,57 @@ menu_filesystems() {
     done
 }
 
-# $1 == program to use, $2 == message
+menu_partitions_wipe() {
+    local device="$1"
+
+    while true; do
+        DIALOG --title " Wipe partitioning information " --yesno "\n
+${BOLD}Do you wish to wipe the partitioning information on \`$device'?${RESET}\n\n
+If you're going to modify the existing partition table, select \`No' here!\n\n
+Otherwise, if you're going to create a fresh partition table, it is\n
+recommended to do this, as otherwise the partitioning information\n
+may not correctly refresh (the system might see the old ones).\n\n
+Please keep in mind that doing this will make all the data on the\n
+drive inaccessible." 16 80
+        if [ $? -eq 0 ]; then
+            DIALOG --title " Do you want to proceed? " --yesno "\n
+${BOLD}This will wipe the partitioning information on \`$device'.${RESET}\n\n
+Do you wish to continue?" ${MSGBOXSIZE}
+            if [ $? -eq 0 ]; then
+                break
+            else
+                continue
+            fi
+        elif [ $? -eq 1 ]; then
+            return
+        else
+            continue
+        fi
+    done
+
+    INFOBOX "Wiping partitioning on \`${device}'..." 4 60
+    echo "Wiping partitioning information on $device..." >$LOG
+    wipefs -a "$device" >$LOG 2>&1
+    if [ $? -ne 0 ]; then
+        DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
+        wiping the partitioning info failed.\n
+        Check $LOG for errors." ${MSGBOXSIZE}
+    fi
+
+    sync && sync && sync
+    blockdev --rereadpt "$device"
+}
+
+# $1 == program to use, $2 == message, $3 == whether to offer wipe menu
 menu_partitions_base() {
     DIALOG --title " Select the disk to partition " \
         --menu "$MENULABEL" ${MENUSIZE} $(show_disks)
     if [ $? -eq 0 ]; then
         local device=$(cat $ANSWER)
+
+        if [ -n "$3" ]; then
+            menu_partitions_wipe "$device"
+        fi
 
         DIALOG --title "Modify Partition Table on $device" --msgbox "\n
 ${BOLD}$1 will be executed in disk $device.${RESET}\n\n$2" 18 80
@@ -604,7 +649,7 @@ c 4p 4p swap\n\n
 At least the bootstrap partition must be present on APM.\n
 Other partitions can be made on other devices with other\n
 partitioning schemes.\n
-${RESET}\n"
+${RESET}\n" 1
 }
 
 menu_partitions_ppcmac() {
