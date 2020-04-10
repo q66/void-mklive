@@ -32,6 +32,7 @@ umask 022
 readonly REQUIRED_PKGS_ALL="base-files libgcc dash coreutils sed tar gawk squashfs-tools xorriso"
 readonly REQUIRED_PKGS_X86="syslinux grub-i386-efi grub-x86_64-efi"
 readonly REQUIRED_PKGS_PPC="grub-powerpc-ieee1275"
+readonly REQUIRED_PKGS_PPC_MAC="yaboot"
 
 readonly INITRAMFS_PKGS="binutils xz device-mapper dhclient dracut-network"
 readonly PROGNAME=$(basename "$0")
@@ -317,6 +318,26 @@ generate_grub_powerpc_boot() {
     # volume icons for mac
     cp -f ppc/Void.icns "${IMAGEDIR}/Icon"
     cp -f ppc/Void.icns "${IMAGEDIR}/.VolumeIcon.icns"
+
+    if [ -n "$HAVE_YABOOT" ]; then
+        cp -f "$VOIDHOSTDIR"/usr/lib/yaboot/yaboot "$BOOT_DIR"
+        cp -f ppc/yaboot.msg.in "$BOOT_DIR"/yaboot.msg
+        cp -f ppc/yaboot.conf.in "$BOOT_DIR"/yaboot.conf
+        sed -i \
+            -e "s|@@KERNVER@@|${KERNELVERSION}|" \
+            -e "s|@@KERNVER_ALT@@|${ALTKERNELVERSION}|" \
+            -e "s|@@ARCH@@|$BASE_ARCH|" \
+            -e "s|@@BOOT_TITLE@@|${BOOT_TITLE}|" "$BOOT_DIR"/yaboot.msg
+        sed -i \
+            -e "s|@@KEYMAP@@|${KEYMAP}|" \
+            -e "s|@@BOOT_CMDLINE@@|${BOOT_CMDLINE}|" \
+            -e "s|@@LOCALE@@|${LOCALE}|" "$BOOT_DIR"/yaboot.conf
+        if [ -z "$ALTKERNELVERSION" ]; then
+            # remove the alt kernel sections
+            sed -i '/^livealt/d' "$BOOT_DIR"/yaboot.msg
+            sed -i '/^# alt kernel/,$ d' "$BOOT_DIR"/yaboot.conf
+        fi
+    fi
 }
 
 generate_squashfs() {
@@ -499,6 +520,13 @@ REQUIRED_PKGS="$REQUIRED_PKGS_ALL"
 case "$BASE_ARCH" in
     ppc*) REQUIRED_PKGS="$REQUIRED_PKGS $REQUIRED_PKGS_PPC" ;;
     *) REQUIRED_PKGS="$REQUIRED_PKGS $REQUIRED_PKGS_X86" ;;
+esac
+case "$BASE_ARCH" in
+    ppc64le*) ;;
+    ppc*)
+        REQUIRED_PKGS="$REQUIRED_PKGS $REQUIRED_PKGS_PPC_MAC"
+        HAVE_YABOOT=yes
+        ;;
 esac
 
 print_step "Installing software to generate the image: ${REQUIRED_PKGS} ..."

@@ -1,0 +1,35 @@
+## Alternative ISO bootloader for void-ppc
+## Only use if GRUB doesn't work for some reason
+
+default=live
+message=/boot/yaboot.msg
+
+image=/boot/vmlinux
+	label=live
+	initrd=/boot/initrd
+	append=" init=/sbin/init rd.luks=0 rd.md=0 rd.dm=0 loglevel=4 vconsole.unicode=1 vconsole.keymap=@@KEYMAP@@ locale.LANG=@@LOCALE@@ @@BOOT_CMDLINE@@ ---"
+	root=live:CDLABEL=VOID_LIVE
+	read-only
+
+image=/boot/vmlinux
+	label=liveram
+	initrd=/boot/initrd
+	append=" init=/sbin/init rd.luks=0 rd.md=0 rd.dm=0 loglevel=4 vconsole.unicode=1 vconsole.keymap=@@KEYMAP@@ locale.LANG=@@LOCALE@@ @@BOOT_CMDLINE@@ rd.live.ram ---"
+	root=live:CDLABEL=VOID_LIVE
+	read-only
+
+# alt kernel
+
+image=/boot/vmlinux_alt
+	label=livealt
+	initrd=/boot/initrd_alt
+	append=" init=/sbin/init rd.luks=0 rd.md=0 rd.dm=0 loglevel=4 vconsole.unicode=1 vconsole.keymap=@@KEYMAP@@ locale.LANG=@@LOCALE@@ @@BOOT_CMDLINE@@ ---"
+	root=live:CDLABEL=VOID_LIVE
+	read-only
+
+image=/boot/vmlinux_alt
+	label=livealtram
+	initrd=/boot/initrd_alt
+	append=" init=/sbin/init rd.luks=0 rd.md=0 rd.dm=0 loglevel=4 vconsole.unicode=1 vconsole.keymap=@@KEYMAP@@ locale.LANG=@@LOCALE@@ @@BOOT_CMDLINE@@ rd.live.ram ---"
+	root=live:CDLABEL=VOID_LIVE
+	read-only
