@@ -32,11 +32,21 @@ case "$ARCH" in
 esac
 
 case "$ARCH" in
+	ppc64le*)
+		readonly EXTRA_PKGS=""
+		readonly EXTRA_X_PKGS=""
+		;;
+	ppc64*)
+		readonly EXTRA_PKGS="mac-fdisk hfsutils"
+		readonly EXTRA_X_PKGS=""
+		;;
 	ppc*)
 		readonly EXTRA_PKGS="mac-fdisk hfsutils"
+		readonly EXTRA_X_PKGS="xf86-video-r128 xf86-video-mach64"
 		;;
 	*)
 		readonly EXTRA_PKGS=""
+		readonly EXTRA_X_PKGS=""
 		;;
 esac
 
@@ -64,7 +74,7 @@ choose_browser() {
 }
 
 readonly BASE_PKGS="dialog cryptsetup lvm2 mdadm $EXTRA_PKGS $GRUB"
-readonly X_PKGS="$BASE_PKGS xorg-minimal xorg-input-drivers xorg-video-drivers setxkbmap xauth font-misc-misc terminus-font dejavu-fonts-ttf alsa-plugins-pulseaudio"
+readonly X_PKGS="$BASE_PKGS xorg-minimal xorg-input-drivers xorg-video-drivers setxkbmap xauth font-misc-misc terminus-font dejavu-fonts-ttf alsa-plugins-pulseaudio $EXTRA_X_PKGS"
 readonly E_PKGS="$X_PKGS lxdm enlightenment terminology econnman udisks2 $(choose_browser e)"
 readonly XFCE_PKGS="$X_PKGS lxdm xfce4 gnome-themes-standard gnome-keyring network-manager-applet gvfs-afc gvfs-mtp gvfs-smb udisks2 $(choose_browser xfce)"
 readonly MATE_PKGS="$X_PKGS lxdm mate mate-extra gnome-keyring network-manager-applet gvfs-afc gvfs-mtp gvfs-smb udisks2 $(choose_browser mate)"
