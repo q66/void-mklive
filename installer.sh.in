@@ -1133,24 +1133,23 @@ finalize_bootloader_mac() {
     humount >$LOG 2>&1
     DIALOG --yesno "Do you want to update the boot device NVRAM record?" ${YESNOSIZE}
     if [ $? -eq 0 ]; then
-        local bs_ofpath bs_devn bs_partn bs_partnum bs_devline
-        bs_ofpath="$(ofpathname $dev)"
-        if [ $? -ne 0 ]; then
+        local bs_ofpath bs_devn bs_devline
+        case "$PPC_FLAVOR" in
+            mac*)
+                if [ -n "$(command -v ofpath)" ]; then
+                    bs_ofpath="$(ofpath $dev)"
+                else
+                    bs_ofpath="$(ofpathname $dev)"
+                fi
+                ;;
+            *) bs_ofpath="$(ofpathname $dev)" ;;
+        if [ $? -ne 0 -o -z "$bs_ofpath" ]; then
             DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
 failed to get OF path for ${dev}, not updating NVRAM!\ncheck $LOG for errors." ${MSGBOXSIZE}
             return
         fi
-        bs_devn=$(lsblk -no pkname "$dev") >$LOG 2>&1
-        bs_partn=$(lsblk -no name "$dev") >$LOG 2>&1
-        if [ -n "$bs_devn" -a -n "$bs_partn" ]; then
-            bs_partnum=$(cat "/sys/block/${bs_devn}/${bs_partn}/partition")
-        fi
-        if [ -z "$bs_partnum" ]; then
-            DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
-failed to get partition number for ${dev}, not updating NVRAM!\ncheck $LOG for errors." ${MSGBOXSIZE}
-            return
-        fi
-        bs_devline="${bs_ofpath}:${bs_partnum},\\\\BootX"
+        bs_devn=$(lsblk -no maj:min "$dev"|grep -o ':[0-9]\+')
+        bs_devline="${bs_ofpath}${bs_devn},\\\\BootX"
         nvsetenv boot-device "$bs_devline" >$LOG 2>&1
         if [ $? -ne 0 ]; then
             DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
