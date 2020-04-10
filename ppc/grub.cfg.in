@@ -1,3 +1,6 @@
+# kernel is specified on one line, as petitboot does not handle line
+# escapes correctly, so some parameters wouldn't be passed otherwise
+
 set pager="1"
 set timeout="10"
 set default="void-live"
@@ -7,10 +10,7 @@ menuentry "@@BOOT_TITLE@@ @@KERNVER@@ (@@ARCH@@)" --id void-live {
     insmod iso9660
     insmod linux
     search --label "VOID_LIVE" --hint cd,apple2
-    linux /boot/vmlinux root=live:CDLABEL=VOID_LIVE ro init=/sbin/init \
-    rd.luks=0 rd.md=0 rd.dm=0 loglevel=4 gpt \
-    vconsole.unicode=1 vconsole.keymap=@@KEYMAP@@ \
-    locale.LANG=@@LOCALE@@ @@BOOT_CMDLINE@@
+    linux /boot/vmlinux root=live:CDLABEL=VOID_LIVE ro init=/sbin/init rd.luks=0 rd.md=0 rd.dm=0 loglevel=4 vconsole.unicode=1 vconsole.keymap=@@KEYMAP@@ locale.LANG=@@LOCALE@@ @@BOOT_CMDLINE@@
     initrd /boot/initrd
 }
 
@@ -19,9 +19,26 @@ menuentry "@@BOOT_TITLE@@ @@KERNVER@@ (@@ARCH@@) (RAM)" --id void-live-ram {
     insmod iso9660
     insmod linux
     search --label "VOID_LIVE" --hint cd,apple2
-    linux /boot/vmlinux root=live:CDLABEL=VOID_LIVE ro init=/sbin/init \
-    rd.luks=0 rd.md=0 rd.dm=0 loglevel=4 gpt \
-    vconsole.unicode=1 vconsole.keymap=@@KEYMAP@@ \
-    locale.LANG=@@LOCALE@@ @@BOOT_CMDLINE@@ rd.live.ram
+    linux /boot/vmlinux root=live:CDLABEL=VOID_LIVE ro init=/sbin/init rd.luks=0 rd.md=0 rd.dm=0 loglevel=4 vconsole.unicode=1 vconsole.keymap=@@KEYMAP@@ locale.LANG=@@LOCALE@@ @@BOOT_CMDLINE@@ rd.live.ram
     initrd /boot/initrd
+}
+
+# alt kernel
+
+menuentry "@@BOOT_TITLE@@ @@KERNVER_ALT@@ (@@ARCH@@)" --id void-live-alt {
+    insmod part_apple
+    insmod iso9660
+    insmod linux
+    search --label "VOID_LIVE" --hint cd,apple2
+    linux /boot/vmlinux_alt root=live:CDLABEL=VOID_LIVE ro init=/sbin/init rd.luks=0 rd.md=0 rd.dm=0 loglevel=4 vconsole.unicode=1 vconsole.keymap=@@KEYMAP@@ locale.LANG=@@LOCALE@@ @@BOOT_CMDLINE@@
+    initrd /boot/initrd_alt
+}
+
+menuentry "@@BOOT_TITLE@@ @@KERNVER_ALT@@ (@@ARCH@@) (RAM)" --id void-live-alt-ram {
+    insmod part_apple
+    insmod iso9660
+    insmod linux
+    search --label "VOID_LIVE" --hint cd,apple2
+    linux /boot/vmlinux_alt root=live:CDLABEL=VOID_LIVE ro init=/sbin/init rd.luks=0 rd.md=0 rd.dm=0 loglevel=4 vconsole.unicode=1 vconsole.keymap=@@KEYMAP@@ locale.LANG=@@LOCALE@@ @@BOOT_CMDLINE@@ rd.live.ram
+    initrd /boot/initrd_alt
 }
