@@ -1395,6 +1395,15 @@ the mount point for the root filesystem (/) has not yet been configured." ${MSGB
 The EFI System Partition has not yet been configured, please create it\n
 as FAT32, mountpoint /boot/efi and at least with 100MB of size." ${MSGBOXSIZE}
         return 1
+    elif [ "$PPC_FLAVOR" = "mac" -a "$bootdev" != "none" ]; then
+        local pdev="/dev/$(lsblk -no pkname $bootdev)"
+        local ptname=$(pmac-fdisk -r -l "$pdev"|grep "$bootdev"|awk '{print $2}')
+        if [ "$ptname" != "Apple_Bootstrap" ]; then
+            DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
+You haven't specified a correct Apple_Bootstrap partition, please check\n
+your settings and amend the partitioning/selection appropriately." ${MSGBOXSIZE}
+            return 1
+        fi
     fi
     FILESYSTEMS_DONE=1
 }
