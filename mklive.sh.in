@@ -85,6 +85,7 @@ directory if unset).
  -C "cmdline args"  Add additional kernel command line arguments.
  -T "title"         Modify the bootloader title.
  -v linux<version>  Install a custom Linux version on ISO image (linux meta-package if unset).
+ -V linux<version>  Install a secondary Linux version on ISO image (none if unset).
  -K                 Do not remove builddir.
 
 The $PROGNAME script generates a live image of the Void Linux distribution.
@@ -159,15 +160,30 @@ generate_initramfs() {
 
     copy_dracut_files "$ROOTFS"
     copy_autoinstaller_files "$ROOTFS"
+
     chroot "$ROOTFS" env -i /usr/bin/dracut -N --"${INITRAMFS_COMPRESSION}" \
         --add-drivers "ahci" --force-add "vmklive autoinstaller" --omit systemd "/boot/initrd" $KERNELVERSION
     [ $? -ne 0 ] && die "Failed to generate the initramfs"
+
+    if [ -n "$ALTKERNELVERSION" ]; then
+        chroot "$ROOTFS" env -i /usr/bin/dracut -N --"${INITRAMFS_COMPRESSION}" \
+            --add-drivers "ahci" --force-add "vmklive autoinstaller" --omit systemd "/boot/initrd_alt" $ALTKERNELVERSION
+        [ $? -ne 0 ] && die "Failed to generate the initramfs"
+    fi
 
     mv "$ROOTFS"/boot/initrd "$BOOT_DIR"
     if [ -f "${ROOTFS}/boot/vmlinuz-$KERNELVERSION" ]; then
         cp "${ROOTFS}/boot/vmlinuz-$KERNELVERSION" "$BOOT_DIR"/vmlinuz
     else
         cp "${ROOTFS}/boot/vmlinux-$KERNELVERSION" "$BOOT_DIR"/vmlinux
+    fi
+    if [ -n "$ALTKERNELVERSION" ]; then
+        mv "$ROOTFS"/boot/initrd_alt "$BOOT_DIR"
+        if [ -f "${ROOTFS}/boot/vmlinuz-$ALTKERNELVERSION" ]; then
+            cp "${ROOTFS}/boot/vmlinuz-$ALTKERNELVERSION" "$BOOT_DIR"/vmlinuz_alt
+        else
+            cp "${ROOTFS}/boot/vmlinux-$ALTKERNELVERSION" "$BOOT_DIR"/vmlinux_alt
+        fi
     fi
 }
 
@@ -196,6 +212,7 @@ generate_isolinux_boot() {
 
     sed -i  -e "s|@@SPLASHIMAGE@@|$(basename "${SPLASH_IMAGE}")|" \
         -e "s|@@KERNVER@@|${KERNELVERSION}|" \
+        -e "s|@@KERNVER_ALT@@|${ALTKERNELVERSION}|" \
         -e "s|@@KEYMAP@@|${KEYMAP}|" \
         -e "s|@@ARCH@@|$BASE_ARCH|" \
         -e "s|@@LOCALE@@|${LOCALE}|" \
@@ -209,6 +226,7 @@ generate_grub_efi_boot() {
     cp -f grub/grub_void.cfg.in "$GRUB_DIR"/grub_void.cfg
     sed -i  -e "s|@@SPLASHIMAGE@@|$(basename "${SPLASH_IMAGE}")|" \
         -e "s|@@KERNVER@@|${KERNELVERSION}|" \
+        -e "s|@@KERNVER_ALT@@|${ALTKERNELVERSION}|" \
         -e "s|@@KEYMAP@@|${KEYMAP}|" \
         -e "s|@@ARCH@@|$BASE_ARCH|" \
         -e "s|@@BOOT_TITLE@@|${BOOT_TITLE}|" \
@@ -261,11 +279,16 @@ generate_grub_powerpc_boot() {
     cp -f ppc/grub.cfg.in "$GRUB_DIR"/grub.cfg
     sed -i \
         -e "s|@@KERNVER@@|${KERNELVERSION}|" \
+        -e "s|@@KERNVER_ALT@@|${ALTKERNELVERSION}|" \
         -e "s|@@KEYMAP@@|${KEYMAP}|" \
         -e "s|@@ARCH@@|$BASE_ARCH|" \
         -e "s|@@BOOT_TITLE@@|${BOOT_TITLE}|" \
         -e "s|@@BOOT_CMDLINE@@|${BOOT_CMDLINE}|" \
         -e "s|@@LOCALE@@|${LOCALE}|" "$GRUB_DIR"/grub.cfg
+    if [ -z "$ALTKERNELVERSION" ]; then
+        # remove the alt kernel sections
+        sed -i '/^# alt kernel/,$ d' "$GRUB_DIR"/grub.cfg
+    fi
 
     cp -a "$IMAGEDIR"/boot "$VOIDHOSTDIR"
     xbps-uchroot "$VOIDHOSTDIR" grub-mkimage -- \
@@ -352,7 +375,7 @@ generate_iso_image() {
 #
 # main()
 #
-while getopts "a:b:r:c:C:T:Kk:l:i:I:s:S:o:p:v:h" opt; do
+while getopts "a:b:r:c:C:T:Kk:l:i:I:s:S:o:p:v:V:h" opt; do
     case $opt in
         a) BASE_ARCH="$OPTARG";;
         b) BASE_SYSTEM_PKG="$OPTARG";;
@@ -370,6 +393,7 @@ while getopts "a:b:r:c:C:T:Kk:l:i:I:s:S:o:p:v:h" opt; do
         C) BOOT_CMDLINE="$OPTARG";;
         T) BOOT_TITLE="$OPTARG";;
         v) LINUX_VERSION="$OPTARG";;
+        V) LINUX_ALTVERSION="$OPTARG";;
         h) usage;;
 	*) usage;;
     esac
@@ -446,6 +470,20 @@ if [ -n "$LINUX_VERSION" ]; then
     PACKAGE_LIST="$PACKAGE_LIST $LINUX_VERSION"
 else # Otherwise find latest stable version from linux meta-package
     _linux_series=$(XBPS_ARCH=$BASE_ARCH $XBPS_QUERY_CMD -r "$ROOTFS" ${XBPS_REPOSITORY:=-R} -x linux|head -1)
+fi
+
+if [ -n "$LINUX_ALTVERSION" ]; then
+    if ! echo "$LINUX_ALTVERSION" | grep "linux[0-9._]*"; then
+        die "-V option must be in format linux<version>"
+    fi
+
+    PACKAGE_LIST="$PACKAGE_LIST $LINUX_ALTVERSION"
+    _kveralt=$(XBPS_ARCH=$BASE_ARCH $XBPS_QUERY_CMD -r "$ROOTFS" ${XBPS_REPOSITORY:=-R} -p pkgver ${LINUX_ALTVERSION})
+    ALTKERNELVERSION=$($XBPS_UHELPER_CMD getpkgversion ${_kveralt})
+
+    if [ "$?" -ne "0" ]; then
+        die "Failed to find kernel package version"
+    fi
 fi
 
 _kver=$(XBPS_ARCH=$BASE_ARCH $XBPS_QUERY_CMD -r "$ROOTFS" ${XBPS_REPOSITORY:=-R} -p pkgver ${_linux_series})
