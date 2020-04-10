@@ -1,0 +1,13 @@
+Welcome to Void Linux for PowerPC
+
+This is Void live media, using the
+alternative yaboot bootloader.
+
+Enter one of the following:
+
+live        @@BOOT_TITLE@@ @@KERNVER@@ (@@ARCH@@)
+liveram     @@BOOT_TITLE@@ @@KERNVER@@ (@@ARCH@@) (run from RAM)
+livealt     @@BOOT_TITLE@@ @@KERNVER_ALT@@ (@@ARCH@@)
+livealtram  @@BOOT_TITLE@@ @@KERNVER_ALT@@ (@@ARCH@@) (run from RAM)
+
+Press TAB for a full list of options.
