@@ -1137,16 +1137,11 @@ finalize_bootloader_mac() {
     DIALOG --yesno "Do you want to update the boot device NVRAM record?" ${YESNOSIZE}
     if [ $? -eq 0 ]; then
         local bs_ofpath bs_devn bs_devline
-        case "$PPC_FLAVOR" in
-            mac*)
-                if [ -n "$(command -v ofpath)" ]; then
-                    bs_ofpath="$(ofpath $dev)"
-                else
-                    bs_ofpath="$(ofpathname $dev)"
-                fi
-                ;;
-            *) bs_ofpath="$(ofpathname $dev)" ;;
-        esac
+        if [ -n "$(command -v ofpath)" ]; then
+            bs_ofpath="$(ofpath $dev)"
+        else
+            bs_ofpath="$(ofpathname $dev)"
+        fi
         if [ $? -ne 0 -o -z "$bs_ofpath" ]; then
             DIALOG --msgbox "${BOLD}${RED}ERROR:${RESET} \
 failed to get OF path for ${dev}, not updating NVRAM!\ncheck $LOG for errors." ${MSGBOXSIZE}
