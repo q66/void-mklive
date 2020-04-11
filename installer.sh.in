@@ -632,7 +632,7 @@ ${BOLD}WARNING: /usr is not supported as a separate partition.${RESET}\n
 ${RESET}\n"
 }
 
-menu_partitions_ppcmac_cfdisk() {
+menu_partitions_ppcmac_other() {
     menu_partitions_base any "
 You can use this to partition non-bootable devices.\n\n
 In order to boot from a device, it needs to contain an Apple\n
