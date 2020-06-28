@@ -1,0 +1,21 @@
+###############################################################################
+
+Welcome to the Void Linux system. Two users are available to log in:
+
+	- root:voidlinux
+	- anon:voidlinux
+
+The `anon` user additionally has `sudo(8)` permissions to run any command
+without a password.
+
+To install additional software make sure to configure your network interface
+and then use:
+
+	- xbps-install(1) to install/update packages
+	- xbps-query(1) to query for package info
+
+Thanks for using Void Linux.
+
+    https://www.voidlinux.org
+
+###############################################################################
