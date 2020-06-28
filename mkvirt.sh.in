@@ -1,0 +1,431 @@
+#!/bin/sh
+#
+#-
+# Copyright (c) 2020 Daniel 'q66' Kolesa.
+# Copyright (c) 2009-2020 Juan Romero Pardines.
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
+# IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
+# OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
+# IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
+# INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+# NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+# DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+# THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
+# THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+#-
+
+trap 'error_out $? $LINENO' INT TERM 0
+umask 022
+
+readonly PROGNAME=$(basename "$0")
+
+info_msg() {
+    printf "\033[1m$@\n\033[m"
+}
+
+die() {
+    info_msg "ERROR: $@"
+    error_out 1 $LINENO
+}
+
+mount_pseudofs() {
+    for f in sys dev proc; do
+        mkdir -p "$1"/$f
+        mount --bind /$f "$1"/$f
+    done
+}
+
+umount_pseudofs() {
+    if [ -n "$ROOTFS" -a -d "$ROOTFS" ]; then
+        umount -f "$ROOTFS"/sys >/dev/null 2>&1
+        umount -f "$ROOTFS"/dev >/dev/null 2>&1
+        umount -f "$ROOTFS"/proc >/dev/null 2>&1
+    fi
+    if [ -n "$TARGETFS" -a -d "$TARGETFS" ]; then
+        umount -f "$TARGETFS"/sys >/dev/null 2>&1
+        umount -f "$TARGETFS"/dev >/dev/null 2>&1
+        umount -f "$TARGETFS"/proc >/dev/null 2>&1
+        umount -f "$TARGETFS"/tmp >/dev/null 2>&1
+    fi
+}
+
+detach_nbd() {
+    [ -z "$TARGETFS" ] && return 0
+    if mountpoint "$TARGETFS" >/dev/null 2>&1; then
+        umount -f "$TARGETFS" >/dev/null 2>&1
+    fi
+    qemu-nbd --disconnect "$NBD_NODE" >/dev/null 2>&1
+}
+
+error_out() {
+    umount_pseudofs
+    detach_nbd
+    [ -d "$BUILDDIR" -a -z "$KEEP_BUILDDIR" ] && rm -rf "$BUILDDIR"
+    exit "${1:=0}"
+}
+
+usage() {
+    cat <<_EOF
+Usage: $PROGNAME [options]
+
+Options:
+ -a <xbps-arch>     Set XBPS_ARCH (do not use it unless you know what it is)
+ -b <system-pkg>    Set an alternative base-system package (defaults to base-system).
+ -r <repo-url>      Use this XBPS repository (may be specified multiple times).
+ -c <cachedir>      Use this XBPS cache directory (a subdirectory of current
+directory if unset).
+ -l <locale>        Default locale to use (en_US.UTF-8 if unset).
+ -s <size>          The root filesystem size (10G if unset).
+ -o <file>          Output file name for the qcow2 image (auto if unset).
+ -p "pkg pkgN ..."  Install additional packages into the image.
+ -S "srv srvN ..."  Enable additional services in the image.
+ -I <includedir>    Include directory structure under given path into rootfs
+
+ -C "cmdline args"  Add additional kernel command line arguments.
+ -v linux<version>  Install a custom Linux version on ISO image (linux meta-package if unset).
+ -K                 Do not remove builddir.
+ -B                 Do not compress the resulting image.
+
+The $PROGNAME script generates a VM image of the Void Linux distribution.
+This image can be booted in qemu or other supported virtual machines.
+_EOF
+    exit 1
+}
+
+copy_void_keys() {
+    mkdir -p "$1"/var/db/xbps/keys
+    cp keys/*.plist "$1"/var/db/xbps/keys
+}
+
+copy_void_conf() {
+    install -Dm644 data/void-vpkgs.conf "$1"/usr/share/xbps.d/void-virtualpkgs.conf
+}
+
+install_system() {
+    local kcmdline="$BOOT_CMDLINE"
+
+    copy_void_conf "$ROOTFS"
+
+    XBPS_ARCH=$BASE_ARCH "${XBPS_INSTALL_CMD}" -r "$ROOTFS" \
+        ${XBPS_REPOSITORY} -c "$XBPS_CACHEDIR" -yn $PACKAGE_LIST
+    [ $? -ne 0 ] && die "Missing required binary packages, exiting..."
+
+    mount_pseudofs "$ROOTFS"
+
+    LANG=C XBPS_ARCH=$BASE_ARCH "${XBPS_INSTALL_CMD}" -U -r "$ROOTFS" \
+        ${XBPS_REPOSITORY} -c "$XBPS_CACHEDIR" -y $PACKAGE_LIST
+    [ $? -ne 0 ] && die "Failed to install $PACKAGE_LIST"
+
+    xbps-reconfigure -r "$ROOTFS" -f base-files >/dev/null 2>&1
+    chroot "$ROOTFS" env -i xbps-reconfigure -f base-files
+
+    # Enable choosen UTF-8 locale and generate it into the target rootfs.
+    if [ -f "$ROOTFS"/etc/default/libc-locales ]; then
+        sed -e "s/\#\(${LOCALE}.*\)/\1/g" -i "$ROOTFS"/etc/default/libc-locales
+    fi
+
+    chroot "$ROOTFS" env -i xbps-reconfigure -a
+    mkdir -p "$ROOTFS"/boot/grub
+
+    # Default services
+    ln -s /etc/sv/dhcpcd "$ROOTFS"/etc/runit/runsvdir/default/
+    ln -s /etc/sv/sshd "$ROOTFS"/etc/runit/runsvdir/default/
+
+    if [ -n "$SERVICE_LIST" ]; then
+        for serv in $SERVICE_LIST; do
+            ln -s /etc/sv/$serv "$ROOTFS"/etc/runit/runsvdir/default/
+        done
+    fi
+
+    # Serial console
+    local scon="ttyS0"
+    case "$BASE_ARCH" in
+        ppc*) scon="hvc0";;
+    esac
+
+    ln -s /etc/sv/agetty-$scon "$ROOTFS"/etc/runit/runsvdir/default/
+    kcmdline="$kcmdline console=$scon console=tty0"
+
+    # GRUB tweaks
+    echo "" >> "$ROOTFS"/etc/default/grub
+    echo "# Added by void-mkvirt" >> "$ROOTFS"/etc/default/grub
+    echo "GRUB_CMDLINE_LINUX=\"$kcmdline\"" >> "$ROOTFS"/etc/default/grub
+    echo "GRUB_DISABLE_OS_PROBER=true" >> "$ROOTFS"/etc/default/grub
+    echo "GRUB_TERMINAL_OUTPUT=console" >> "$ROOTFS"/etc/default/grub
+    echo "GRUB_TERMINAL_INPUT=console" >> "$ROOTFS"/etc/default/grub
+
+    # users
+    chroot "$ROOTFS" env -i useradd -m -c anon \
+        -G wheel,audio,video,xbuilder -s /bin/sh anon
+    chroot "$ROOTFS" env -i passwd -d anon >/dev/null 2>&1
+    chroot "$ROOTFS" env -i sh -c 'echo "root:voidlinux" | chpasswd -c SHA512'
+    chroot "$ROOTFS" env -i sh -c 'echo "anon:voidlinux" | chpasswd -c SHA512'
+
+    # hostname
+    echo void-virt > "$ROOTFS"/etc/hostname
+}
+
+copy_include_directory() {
+    find "$INCLUDE_DIRECTORY" -mindepth 1 -maxdepth 1 -exec cp -rfpPv {} "$ROOTFS"/ \;
+}
+
+create_image() {
+    qemu-img create -f qcow2 "$TARGETIMG" "$ROOTFS_SIZE"
+    [ $? -ne 0 ] && die "Failed to create the image"
+
+    qemu-nbd -f qcow2 -c "$NBD_NODE" "$TARGETIMG"
+    [ $? -ne 0 ] && die "Failed to attach the image"
+
+    # This part is dangerous - it partitions the image
+    # o            # create a MBR
+    # n            # new partition
+    # p            #   primary
+    # 1            #   number 1
+    #              #   first sector: default
+    # +1M          #   last sector: 1M after first
+    # t            # change partition type
+    # 41           # PPC PReP Boot
+    # a            # bootable flag
+    # n            # new partition
+    # p            #   primary
+    # 2            #   number 2
+    #              #   first sector: default
+    #              #   last sector: default
+    # w            # write and quit
+    fdisk "$NBD_NODE" <<EOF
+o
+n
+p
+1
+
++1M
+t
+41
+a
+n
+p
+2
+
+
+w
+EOF
+    [ $? -ne 0 ] && die "Failed to partition the image"
+
+    mkfs.ext4 "${NBD_NODE}p2"
+    [ $? -ne 0 ] && die "Failed to create filesystem in the image"
+}
+
+install_grub() {
+    # populate /boot/grub, /boot/grub/grub will be bad and grub.cfg useless
+    chroot "$ROOTFS" env -i grub-install --target=powerpc-ieee1275 --no-nvram \
+        --no-bootsector
+    [ $? -ne 0 ] && die "Failed to install GRUB"
+
+    # create a "good" /boot/grub/grub, i.e. with the target partition's
+    # uuid instead of the host partition's; minimal image is fine
+    local fsuuid=$(blkid "${NBD_NODE}p2"|sed 's/.* UUID=\"\([^\"]*\)\".*/\1/')
+    echo "search.fs_uuid ${fsuuid} root" > "$ROOTFS"/boot/grub/early.cfg
+    echo 'set prefix=($root)/boot/grub' >> "$ROOTFS"/boot/grub/early.cfg
+    rm -f "$ROOTFS"/boot/grub/grub
+    chroot "$ROOTFS" env -i grub-mkimage --verbose \
+        --config=/boot/grub/early.cfg \
+        --directory=/usr/lib/grub/powerpc-ieee1275 \
+        --format=powerpc-ieee1275 --output=/boot/grub/grub \
+        --prefix=/boot/grub \
+        search part_msdos ext2
+    [ $? -ne 0 ] && die "Failed to create GRUB image"
+    rm -f "$ROOTFS"/boot/grub/early.cfg
+
+    # write the early grub image into bootstrap
+    dd if="$ROOTFS"/boot/grub/grub of="${NBD_NODE}p1"
+    [ $? -ne 0 ] && die "Failed to write GRUB image"
+}
+
+assemble_image() {
+    # Cleanup and remove useless stuff.
+    rm -rf "$ROOTFS"/var/cache "$ROOTFS"/run "$ROOTFS"/var/run \
+           "$ROOTFS"/tmp
+    mkdir -p "$ROOTFS"/var/cache "$ROOTFS"/run "$ROOTFS"/var/run \
+             "$ROOTFS"/tmp
+
+    # we won't be running stuff in $ROOTFS anymore
+    umount_pseudofs
+
+    mount "${NBD_NODE}p2" "$TARGETFS"
+    [ $? -ne 0 ] && die "Failed to mount filesystem on the image"
+
+    # copy stuff over
+    cp -a "$ROOTFS"/* "$TARGETFS"
+    [ $? -ne 0 ] && die "Failed to copy contents into the image"
+
+    mount_pseudofs "$TARGETFS"
+
+    mkdir -p "$IMAGEDIR"/tmp
+    mount --bind "$IMAGEDIR"/tmp "$TARGETFS"/tmp
+
+    # prevent target FS from being modified
+    mount -o remount,ro "$TARGETFS"
+    [ $? -ne 0 ] && die "Failed to remount target filesystem as ro"
+
+    # create config file
+    chroot "$TARGETFS" env -i grub-mkconfig -o /tmp/grub.cfg
+    [ $? -ne 0 ] && die "Failed to create GRUB configuration file"
+
+    # finalize config
+    mount -o remount,rw "$TARGETFS"
+    [ $? -ne 0 ] && die "Failed to remount target filesystem as rw"
+    cp -a "$IMAGEDIR"/tmp/grub.cfg "$TARGETFS"/boot/grub
+
+    # trim
+    fstrim -v "$TARGETFS"
+
+    # disconnect all
+    umount_pseudofs
+    detach_nbd
+
+    # Final shrink
+    if [ -z "$SKIP_COMPRESS" ]; then
+        qemu-img convert -O qcow2 -c "$TARGETIMG" "$OUTPUT_FILE"
+    else
+        qemu-img convert -O qcow2 "$TARGETIMG" "$OUTPUT_FILE"
+    fi
+    [ $? -ne 0 ] && die "Failed to assemble final image"
+}
+
+#
+# main()
+#
+
+while getopts "a:Bb:r:c:C:Kl:I:s:S:o:p:v:V:h" opt; do
+    case $opt in
+        a) BASE_ARCH="$OPTARG";;
+        B) readonly SKIP_COMPRESS=1;;
+        b) BASE_SYSTEM_PKG="$OPTARG";;
+        r) XBPS_REPOSITORY="--repository=$OPTARG $XBPS_REPOSITORY";;
+        c) XBPS_CACHEDIR="$OPTARG";;
+        K) readonly KEEP_BUILDDIR=1;;
+        l) LOCALE="$OPTARG";;
+        I) INCLUDE_DIRECTORY="$OPTARG";;
+        s) ROOTFS_SIZE="$OPTARG";;
+        o) OUTPUT_FILE="$OPTARG";;
+        p) PACKAGE_LIST="$OPTARG";;
+        S) SERVICE_LIST="$OPTARG";;
+        C) BOOT_CMDLINE="$OPTARG";;
+        v) LINUX_VERSION="$OPTARG";;
+        h) usage;;
+        *) usage;;
+    esac
+done
+
+shift $((OPTIND - 1))
+XBPS_REPOSITORY="$XBPS_REPOSITORY --repository=https://repo.voidlinux-ppc.org/current --repository=https://repo.voidlinux-ppc.org/current/musl --repository=https://repo.voidlinux-ppc.org/current/be --repository=https://repo.voidlinux-ppc.org/current/be/musl --repository=https://repo.voidlinux-ppc.org/current/ppc --repository=https://repo.voidlinux-ppc.org/current/ppc/musl --repository=https://alpha.de.repo.voidlinux.org/current --repository=https://alpha.de.repo.voidlinux.org/current/musl"
+
+ARCH=$(xbps-uhelper arch)
+
+# Set defaults
+
+: ${BASE_ARCH:=$(xbps-uhelper arch 2>/dev/null || uname -m)}
+: ${XBPS_CACHEDIR:="$(pwd -P)"/xbps-cachedir-${BASE_ARCH}}
+: ${LOCALE:=en_US.UTF-8}
+: ${ROOTFS_SIZE:=10G}
+: ${BASE_SYSTEM_PKG:=base-system}
+
+# Required packages in the image for a working system.
+PACKAGE_LIST="$BASE_SYSTEM_PKG grub grub-powerpc-ieee1275 $PACKAGE_LIST"
+
+# Check for root permissions.
+if [ "$(id -u)" -ne 0 ]; then
+    die "Must be run as root, exiting..."
+fi
+
+case "$BASE_ARCH" in
+    ppc64*) ;;
+    *) die "Currently only 64-bit PowerPC is supported" ;;
+esac
+
+lsmod|grep nbd >/dev/null 2>/dev/null
+if [ $? -ne 0 ]; then
+    modprobe -av nbd
+    [ $? -ne 0 ] && die "Failed to load nbd"
+fi
+
+BUILDDIR=$(mktemp --tmpdir="$(pwd -P)" -d)
+BUILDDIR=$(readlink -f "$BUILDDIR")
+IMAGEDIR="$BUILDDIR/image"
+ROOTFS="$IMAGEDIR/rootfs"
+TARGETFS="$IMAGEDIR/targetfs"
+TARGETIMG=$(readlink -m "$IMAGEDIR/target.qcow2" 2>&1)
+NBD_NODE="/dev/nbd0"
+
+: ${XBPS_INSTALL_CMD:=xbps-install}
+: ${XBPS_REMOVE_CMD:=xbps-remove}
+: ${XBPS_QUERY_CMD:=xbps-query}
+: ${XBPS_RINDEX_CMD:=xbps-rindex}
+: ${XBPS_UHELPER_CMD:=xbps-uhelper}
+: ${XBPS_RECONFIGURE_CMD:=xbps-reconfigure}
+
+mkdir -p "$ROOTFS" "$TARGETFS"
+
+info_msg "Synchronizing XBPS repository data..."
+
+copy_void_keys "$ROOTFS"
+
+XBPS_ARCH=$BASE_ARCH $XBPS_INSTALL_CMD -r "$ROOTFS" ${XBPS_REPOSITORY} -S
+
+# Get linux version for ISO
+# If linux version option specified use
+if [ -n "$LINUX_VERSION" ]; then
+    if ! echo "$LINUX_VERSION" | grep "linux[0-9._]*"; then
+        die "-v option must be in format linux<version>"
+    fi
+
+    _linux_series="$LINUX_VERSION"
+    PACKAGE_LIST="$PACKAGE_LIST $LINUX_VERSION"
+else # Otherwise find latest stable version from linux meta-package
+    _linux_series=$(XBPS_ARCH=$BASE_ARCH $XBPS_QUERY_CMD -r "$ROOTFS" ${XBPS_REPOSITORY:=-R} -x linux|head -1)
+fi
+
+_kver=$(XBPS_ARCH=$BASE_ARCH $XBPS_QUERY_CMD -r "$ROOTFS" ${XBPS_REPOSITORY:=-R} -p pkgver ${_linux_series})
+KERNELVERSION=$($XBPS_UHELPER_CMD getpkgversion ${_kver})
+
+if [ "$?" -ne "0" ]; then
+    die "Failed to find kernel package version"
+fi
+
+: ${OUTPUT_FILE="void-virt-${BASE_ARCH}-${KERNELVERSION}-$(date +%Y%m%d).qcow2"}
+
+mkdir -p "$ROOTFS"/etc
+[ -s data/virt/motd ] && cp data/virt/motd "$ROOTFS"/etc
+[ -s data/virt/issue ] && cp data/virt/issue "$ROOTFS"/etc
+
+info_msg "Installing void system into the rootfs (${PACKAGE_LIST}) ..."
+install_system
+
+if [ -n "${INCLUDE_DIRECTORY}" ];then
+    info_msg "Copying directory structure into the rootfs: ${INCLUDE_DIRECTORY} ..."
+    copy_include_directory
+fi
+
+info_msg "Creating root filesystem image ..."
+create_image
+
+info_msg "Installing bootloader ..."
+install_grub
+
+info_msg "Assembling image ..."
+assemble_image
+
+hsize=$(du -sh "$OUTPUT_FILE"|awk '{print $1}')
+info_msg "Created $(readlink -f "$OUTPUT_FILE") ($hsize) successfully."
